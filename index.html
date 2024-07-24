@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <!-- <script src="https://gpac.github.io/mp4box.js/dist/mp4box.all.js"></script> -->
+  </head>
+  <body>
+    <video controls></video>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+      // const mp4boxfile = MP4Box.createFile();
+      // mp4boxfile.onError = console.error;
+      // mp4boxfile.onReady = (info) => {
+      //   console.log(info.tracks.map((track) => track.codec));
+      // };
+      // fetch(
+      //   // "https://dl.dropboxusercontent.com/s/hyeredbcn60feei/BigChunksBunny1.mp4",
+      //   // "https://nickdesaulniers.github.io/netfix/demo/frag_bunny.mp4",
+      //   // "http://vjs.zencdn.net/v/oceans.mp4",
+      //   "http://localhost:8000/videoplayback",
+      //   {
+      //     headers: {
+      //       range: "bytes=0-",
+      //     },
+      //   }
+      // )
+      //   .then((resp) => resp.arrayBuffer())
+      //   .then((buf) => {
+      //     buf.fileStart = 0;
+      //     mp4boxfile.appendBuffer(buf);
+      //     mp4boxfile.flush();
+      //   });
+
+      var video = document.querySelector("video");
+      var sourceBuffer;
+      var assetURL = "http://localhost:8000/videoplayback";
+
+      // var mimeCodec = 'video/mp4; codecs="avc1.4d401f, mp4a.40.2"';
+      // var mimeCodec = 'video/mp4; codecs="avc1.4D401E, mp4a.40.2"';
+      var mimeCodec = 'video/mp4; codecs="avc1.4D401E"';
+
+      var bytes = 0;
+      var totalBytes = 0;
+      var chunkSize = 0;
+      var currentSegment = 0;
+      var mediaSource = new MediaSource();
+      var isSeeking = false;
+      var pendingSegment = null;
+
+      var currentVideoIndex = 0;
+      var currentPlaylistIndex = 0;
+
+      // var hlsUrls = [
+      //   "http://localhost:8000/hls/playlist.m3u8",
+      //   "http://localhost:8000/shakira_bzrp/playlist1.m3u8",
+      // ];
+
+      var hlsUrls = [
+        "http://localhost:8000/videos/markronson_uptownfunk_fragment",
+        "http://localhost:8000/videos/shakira_bzrp",
+      ];
+
+      /*
+      {
+        video: array
+        audio: array
+        audioCodec: string
+        videoCodec: string
+      }
+      */
+      var sources = [];
+
+      const hlsUrl = "http://localhost:8000/hls/playlist.m3u8";
+      let segmentCache = new Map();
+
+      let isOnline = navigator.onLine;
+      let cachedPlaylist = null;
+
+      // let videoBufferSegments = [];
+      // let audioBufferSegments = [];
+
+      // let mimeCodecVideo;
+      // let mimeCodecAudio;
+
+      let hls;
+
+      // async function fetchSegmentAndCache(url) {
+      //   if (segmentCache.has(url)) {
+      //     return segmentCache.get(url);
+      //   }
+
+      //   const response = await fetch(url);
+      //   if (response.ok) {
+      //     const segmentData = await response.arrayBuffer();
+      //     segmentCache.set(url, new Uint8Array(segmentData));
+      //     return segmentData;
+      //   } else {
+      //     throw new Error(`Network error: ${response.statusText}`);
+      //   }
+      // }
+
+      async function fetchSegmentFromCache(url) {
+        return new Promise((resolve, reject) => {
+          // console.log("segmentCache", segmentCache);
+          const cachedData = segmentCache.get(url);
+          // console.log("cachedData", cachedData);
+          if (cachedData) {
+            // Create a new Response object with ArrayBuffer as the body
+            const response = new Response(cachedData);
+            resolve(response);
+          } else {
+            reject(new Error(`Segment not found in cache for URL: ${url}`));
+          }
+        });
+      }
+
+      async function loadPlaylist(url) {
+        const response = await fetch(url);
+        if (response.ok) {
+          const playlistText = await response.text();
+          // const segmentUrls = extractSegmentUrls(playlistText, url);
+          // await Promise.all(segmentUrls.map(fetchSegmentAndCache));
+          segmentCache.set(url, playlistText); // Cache the playlist itself
+          return playlistText;
+        } else {
+          throw new Error(`Network error: ${response.statusText}`);
+        }
+      }
+
+      function extractSegmentUrls(playlistText, baseUrl) {
+        const lines = playlistText.split("\n");
+        const segmentUrls = [];
+        for (const line of lines) {
+          if (line && !line.startsWith("#")) {
+            const segmentUrl = new URL(line, baseUrl).href;
+            segmentUrls.push(segmentUrl);
+          }
+        }
+        return segmentUrls;
+      }
+
+      async function initializePlayer() {
+        hls = new Hls();
+        try {
+          // await loadPlaylist(hlsUrls[currentPlaylistIndex]);
+          hls.loadSource(hlsUrls[currentPlaylistIndex]);
+          hls.attachMedia(video);
+        } catch (error) {
+          console.error("Error loading playlist:", error);
+        }
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch((error) => {
+            console.error("Error playing video:", error);
+          });
+        });
+
+        hls.on(Hls.Events.ERROR, async (event, data) => {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR || !isOnline) {
+            console.error(
+              "Network error, attempting to load from cache:",
+              data
+            );
+            // await loadOfflinePlaylist();
+          } else {
+            console.error("HLS error:", data);
+          }
+        });
+
+        hls.on(Hls.Events.BUFFER_CREATED, function (event, data) {
+          const { tracks } = data;
+          currentPlaylistIndex = currentPlaylistIndex % hlsUrls.length;
+
+          if (!sources[currentPlaylistIndex]) {
+            sources.push({
+              video: [],
+              audio: [],
+              videoCodec: "",
+              audioCodec: "",
+            });
+          }
+
+          sources[
+            currentPlaylistIndex
+          ].videoCodec = `${tracks.video.container}; codecs="${tracks.video.codec}"`;
+          sources[
+            currentPlaylistIndex
+          ].audioCodec = `${tracks.audio.container}; codecs="${tracks.audio.codec}"`;
+        });
+
+        hls.on(Hls.Events.BUFFER_APPENDING, function (event, data) {
+          currentPlaylistIndex = currentPlaylistIndex % hlsUrls.length;
+
+          console.log("data", data);
+          if (data.type === "video") {
+            sources[currentPlaylistIndex].video.push(data.data);
+          } else if (data.type === "audio") {
+            sources[currentPlaylistIndex].audio.push(data.data);
+          }
+
+          // dataStream[data.type].push(data.data);
+        });
+
+        function sourceOpen() {
+          currentPlaylistIndex = currentPlaylistIndex % hlsUrls.length;
+
+          const mimeCodecVideo = sources[currentPlaylistIndex].videoCodec;
+          const mimeCodecAudio = sources[currentPlaylistIndex].audioCodec;
+          const videoBufferSegments = sources[currentPlaylistIndex].video;
+          const audioBufferSegments = sources[currentPlaylistIndex].audio;
+
+          const videoSourceBuffer = mediaSource.addSourceBuffer(mimeCodecVideo);
+          const audioSourceBuffer = mediaSource.addSourceBuffer(mimeCodecAudio);
+
+          let nextVideoSegmentIndex = 0;
+          let nextAudioSegmentIndex = 0;
+
+          videoSourceBuffer.addEventListener(
+            "updateend",
+            appendNextVideoSegment
+          );
+          audioSourceBuffer.addEventListener(
+            "updateend",
+            appendNextAudioSegment
+          );
+
+          appendNextVideoSegment();
+          appendNextAudioSegment();
+
+          function appendNextVideoSegment() {
+            if (
+              nextVideoSegmentIndex < videoBufferSegments.length &&
+              !videoSourceBuffer.updating
+            ) {
+              videoSourceBuffer.appendBuffer(
+                videoBufferSegments[nextVideoSegmentIndex]
+              );
+              nextVideoSegmentIndex++;
+            } else if (
+              nextVideoSegmentIndex === videoBufferSegments.length &&
+              nextAudioSegmentIndex === audioBufferSegments.length
+            ) {
+              mediaSource.endOfStream();
+            }
+          }
+
+          function appendNextAudioSegment() {
+            if (
+              nextAudioSegmentIndex < audioBufferSegments.length &&
+              !audioSourceBuffer.updating
+            ) {
+              audioSourceBuffer.appendBuffer(
+                audioBufferSegments[nextAudioSegmentIndex]
+              );
+              nextAudioSegmentIndex++;
+            } else if (
+              nextAudioSegmentIndex === audioBufferSegments.length &&
+              nextVideoSegmentIndex === videoBufferSegments.length
+            ) {
+              mediaSource.endOfStream();
+            }
+          }
+        }
+
+        video.addEventListener("ended", async () => {
+          currentPlaylistIndex = (currentPlaylistIndex + 1) % hlsUrls.length;
+
+          if (isOnline) {
+            if (sources[currentPlaylistIndex]) {
+              sources[currentPlaylistIndex].video = [];
+              sources[currentPlaylistIndex].audio = [];
+            }
+
+            hls.loadSource(hlsUrls[currentPlaylistIndex]);
+            hls.attachMedia(video);
+          } else {
+            mediaSource = new MediaSource();
+            video.src = URL.createObjectURL(mediaSource);
+            mediaSource.addEventListener("sourceopen", sourceOpen);
+          }
+          //   currentPlaylistIndex = (currentPlaylistIndex + 1) % hlsUrls.length;
+          //   if (blobs.length < 2) {
+          //     blobs.push(segmentCache);
+          //   }
+          //   if (blobs[currentPlaylistIndex]) {
+          //     segmentCache = blobs[currentPlaylistIndex];
+          //   } else {
+          //     segmentCache = new Map();
+          //   }
+          //   console.log("blobs", blobs);
+          //   if (isOnline) {
+          //     await loadPlaylist(hlsUrls[currentPlaylistIndex]);
+          //     hls.loadSource(hlsUrls[currentPlaylistIndex]);
+          //     hls.attachMedia(video);
+          //   } else {
+          //     await loadOfflinePlaylist();
+          //   }
+        });
+      }
+
+      async function loadOfflinePlaylist() {
+        console.log("loadOfflinePlaylist", segmentCache);
+        if (segmentCache.size > 0) {
+          try {
+            // Get the current HLS playlist URL
+            const currentPlaylistUrl = hlsUrls[currentPlaylistIndex];
+
+            // Retrieve the cached playlist from segmentCache
+            const cachedPlaylist = segmentCache.get(currentPlaylistUrl);
+
+            const playlistBlob = new Blob([cachedPlaylist], {
+              type: "application/vnd.apple.mpegurl",
+            });
+            const playlistUrl = URL.createObjectURL(playlistBlob);
+            console.log("playlistUrl", playlistUrl);
+            // hls.loadSource(playlistUrl);
+            // hls.attachMedia(video);
+
+            // Optionally, load individual segments if available
+            const segmentUrls = extractSegmentUrls(
+              cachedPlaylist,
+              currentPlaylistUrl
+            );
+            // console.log("Offline segment URLs:", segmentUrls);
+
+            /*
+            if (
+              "MediaSource" in window &&
+              MediaSource.isTypeSupported(mimeCodec)
+            ) {
+              mediaSource = new MediaSource();
+              video.src = URL.createObjectURL(mediaSource);
+              mediaSource.addEventListener("sourceopen", sourceOpen);
+            } else {
+              console.error("Unsupported MIME type or codec: ", mimeCodec);
+            }
+
+            function sourceOpen(_) {
+              var mediaSource = this;
+              console.log("ENTER");
+              if (!sourceBuffer) {
+                sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+              }
+
+              console.log("sourceBuffer", sourceBuffer);
+
+              sourceBuffer.addEventListener("updateend", () => {
+                if (segmentUrls.length > 0) {
+                  const segmentUrl = segmentUrls.shift();
+                  const cachedSegment = segmentCache.get(segmentUrl);
+                  if (cachedSegment) {
+                    console.log("Appending segment", segmentUrl);
+                    sourceBuffer.appendBuffer(cachedSegment);
+                  } else {
+                    console.warn(
+                      `Offline segment not found in cache for URL: ${segmentUrl}`
+                    );
+                  }
+                } else {
+                  mediaSource.endOfStream();
+                }
+              });
+
+              // Start appending the first segment
+              if (segmentUrls.length > 0) {
+                const segmentUrl = segmentUrls.shift();
+                const cachedSegment = segmentCache.get(segmentUrl);
+                if (cachedSegment) {
+                  console.log("Appending first segment", segmentUrl);
+                  sourceBuffer.appendBuffer(cachedSegment);
+                } else {
+                  console.warn(
+                    `Offline segment not found in cache for URL: ${segmentUrl}`
+                  );
+                }
+              }
+            }*/
+
+            let totalLength = segmentUrls.reduce((acc, segmentUrl) => {
+              const cachedSegment = segmentCache.get(segmentUrl);
+              if (cachedSegment) {
+                return acc + cachedSegment.byteLength;
+              } else {
+                console.warn(
+                  `Offline segment not found in cache for URL: ${segmentUrl}`
+                );
+                return acc;
+              }
+            }, 0);
+
+            let combined = new Uint8Array(totalLength);
+            let offset = 0;
+
+            segmentUrls.forEach((segmentUrl) => {
+              const cachedSegment = segmentCache.get(segmentUrl);
+              if (cachedSegment) {
+                combined.set(new Uint8Array(cachedSegment), offset);
+                offset += cachedSegment.byteLength;
+              }
+            });
+
+            console.log("combined", combined);
+            let finalBlob = new Blob([combined], { type: "video/mp4" });
+
+            console.log("finalBlob", finalBlob);
+            video.src = URL.createObjectURL(finalBlob);
+          } catch (error) {
+            console.error("Error loading offline playlist:", error);
+          }
+        } else {
+          console.error("No offline playlist available");
+        }
+      }
+
+      // Initialize the player
+      initializePlayer();
+
+      /*
+      // Override fetch function to load segments from cache if available
+      const originalFetch = self.fetch;
+      self.fetch = async (input, init) => {
+        if (
+          typeof input === "string" &&
+          (input.endsWith(".ts") || input.endsWith(".m3u8"))
+        ) {
+          if (!isOnline) {
+            try {
+              const cachedResponse = await fetchSegmentFromCache(input);
+              console.log(`Fetching from cache: ${input}`);
+              return cachedResponse;
+            } catch (error) {
+              console.warn(error);
+              return originalFetch(input, init);
+            }
+          } else {
+            return originalFetch(input, init);
+          }
+        }
+        return originalFetch(input, init);
+      };
+      */
+
+      // Listen for online and offline events
+      window.addEventListener("online", () => {
+        console.log("Back online");
+        isOnline = true;
+      });
+
+      window.addEventListener("offline", () => {
+        console.log("Offline");
+        isOnline = false;
+      });
+
+      /*
+              var hls = new Hls();
+              var hlsUrl = hlsUrls[currentVideoIndex]; // Your HLS playlist URL
+
+              hls.loadSource(hlsUrl);
+              hls.attachMedia(video);
+              hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                // Wait for the video to be able to play before calling play()
+
+
+                video.addEventListener("canplay", function () {
+                  video.play().catch((error) => {
+                    console.error("Error playing video:", error);
+                  });
+                });
+
+                video.addEventListener("ended", function () {
+                  // Increment the playlist index
+                  currentPlaylistIndex++;
+                  if (currentPlaylistIndex < hlsUrls.length) {
+                    if (blobs.length < 2) {
+                  blobs.push(video.src);
+                }
+                    loadAndPlayHlsVideo(hlsUrls[currentPlaylistIndex]);
+                  } else {
+                    currentPlaylistIndex = 0;
+                    loadAndPlayHlsVideo(blobs[currentPlaylistIndex]);
+                    console.log("All videos played");
+                  }
+                });
+
+                function loadAndPlayHlsVideo(url) {
+                  hls.loadSource(url);
+                  hls.attachMedia(video);
+                  hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                    console.log("Manifest parsed, starting playback");
+                    video.addEventListener("canplay", function () {
+                      video.play().catch((error) => {
+                        console.error("Error playing video:", error);
+                      });
+                    });
+                  });
+                }
+              });
+
+              hls.on(Hls.Events.ERROR, function (event, data) {
+                console.error("HLS error:", data);
+              });
+            } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+              video.src = videoUrls[currentVideoIndex]; // Your HLS playlist URL
+              console.log("video.src", video.src);
+              video.addEventListener("canplay", function () {
+                video.play().catch((error) => {
+                  console.error("Error playing video:", error);
+                });
+              });
+              video.addEventListener("ended", function () {
+                currentVideoIndex++;
+                if (currentVideoIndex < videoUrls.length) {
+                  video.src = videoUrls[currentVideoIndex];
+                  video.play().catch((error) => {
+                    console.error("Error playing video:", error);
+                  });
+                } else {
+                  currentVideoIndex = 0;
+                  video.src = videoUrls[currentVideoIndex];
+                  video.play().catch((error) => {
+                    console.error("Error playing video:", error);
+                  });
+                  console.log("All videos played");
+                }
+              });
+            */
+
+      /*
+            if ("MediaSource" in window && MediaSource.isTypeSupported(mimeCodec)) {
+              mediaSource = new MediaSource();
+              video.src = URL.createObjectURL(mediaSource);
+              mediaSource.addEventListener("sourceopen", sourceOpen);
+            } else {
+              console.error("Unsupported MIME type or codec: ", mimeCodec);
+            }
+
+            function sourceOpen(_) {
+              var mediaSource = this;
+              sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+              // sourceBuffer.mode = "sequence";
+
+              sourceBuffer.addEventListener("error", function (e) {
+                console.error("SourceBuffer error", e);
+              });
+
+              sourceBuffer.addEventListener("updateend", function () {
+                if (isSeeking) {
+                  isSeeking = false;
+                  if (pendingSegment) {
+                    fetchSegment(pendingSegment.start, pendingSegment.end);
+                  }
+                }
+              });
+              // sourceBuffer.addEventListener("updateend", function () {
+              //   if (bytes < totalBytes) {
+              //     fetchVideo();
+              //   } else {
+              //     mediaSource.endOfStream();
+              //   }
+              // });
+
+              fetchInitialSegment();
+            }
+
+            function fetchInitialSegment() {
+              fetch(assetURL, {
+                headers: {
+                  range: `bytes=0-`,
+                },
+              })
+                .then((response) => {
+                  if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                  }
+
+                  let contentRange = response.headers.get("Content-Range");
+                  let contentLength = response.headers.get("Content-Length");
+                  console.log("contentLength", contentLength);
+                  if (contentRange) {
+                    totalBytes = parseInt(contentRange.split("/")[1]);
+                    chunkSize = parseInt(contentLength);
+                    console.log("Total Bytes:", totalBytes);
+                  } else {
+                    // throw new Error("Content-Range header is missing");
+                  }
+
+                  return response.arrayBuffer();
+                })
+                .then((buffer) => {
+                  currentSegment++;
+                  mediaSource.duration = 1000;
+                  sourceBuffer.appendBuffer(buffer);
+                  console.log("HERE", buffer);
+                })
+                .catch((error) => {
+                  console.error("Error fetching initial video segment:", error);
+                });
+            }
+
+            function fetchNextSegment() {
+              if (currentSegment * chunkSize >= totalBytes || sourceBuffer.updating)
+                return;
+              let startByte = currentSegment * chunkSize;
+              let endByte = Math.min(startByte + chunkSize - 1, totalBytes - 1);
+              currentSegment++;
+              fetchSegment(startByte, endByte);
+            }
+
+            function fetchSegment(startByte, endByte) {
+              console.log("startByte", startByte, endByte);
+              fetch(assetURL, {
+                headers: {
+                  // range: `bytes=${startByte}-${endByte}`,
+                  range: `bytes=${startByte}-`,
+                },
+              })
+                .then((response) => {
+                  if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                  }
+                  return response.arrayBuffer();
+                })
+                .then((buffer) => {
+                  console.log("currentSegment", currentSegment);
+
+                  sourceBuffer.timestampOffset = video.currentTime;
+                  console.log("sourceBuffer", sourceBuffer);
+                  sourceBuffer.appendBuffer(buffer);
+                  console.log("sourceBuffer", sourceBuffer);
+                })
+                .catch((error) => {
+                  console.error("Error fetching video segment:", error);
+                });
+            }
+
+            // video.addEventListener("timeupdate", () => {
+            //   console.log("UPDATED");
+            //   if (video.buffered.length > 0) {
+            //     let bufferedEnd = video.buffered.end(video.buffered.length - 1);
+            //     if (
+            //       bufferedEnd - video.currentTime < 10 &&
+            //       bytes < totalBytes &&
+            //       !sourceBuffer.updating
+            //     ) {
+            //       fetchNextSegment();
+            //     }
+            //   }
+            // });
+
+            // video.addEventListener("seeked", () => {
+            //   console.log("seeked 1");
+            //   if (sourceBuffer.updating) return;
+            //   console.log("seeked 2");
+
+            //   // Clear the buffer and fetch the segment for the new playback position
+            //   let currentTime = video.currentTime;
+            //   let newSegment = Math.floor(
+            //     ((currentTime / video.duration) * totalBytes) / chunkSize
+            //   );
+            //   let startByte = newSegment * chunkSize;
+            //   let endByte = Math.min(startByte + chunkSize - 1, totalBytes - 1);
+
+            //   currentSegment = newSegment + 1;
+
+            //   // sourceBuffer.abort();
+
+            //   // sourceBuffer.remove(0, video.duration); // Clear the buffer
+
+            //   fetchSegment(startByte, endByte);
+            // });
+            video.addEventListener("waiting", () => {
+              console.log("WAITING");
+              if (!sourceBuffer.updating && currentSegment * chunkSize < totalBytes) {
+                let currentTime = video.currentTime;
+                console.log("currentTime", currentTime);
+                let newSegment = Math.floor(
+                  ((currentTime / video.duration) * totalBytes) / chunkSize
+                );
+                currentSegment = newSegment + 1;
+                let startByte = currentSegment * chunkSize;
+
+                isSeeking = true;
+                pendingSegment = { start: startByte, end: {} };
+
+                console.log("startByte", currentTime / video.duration);
+                console.log("TOTAL", totalBytes);
+                console.log("NEW SEGMENT", startByte, newSegment, chunkSize);
+
+                let first = video.buffered.end(0);
+                sourceBuffer.abort();
+                sourceBuffer.remove(0, video.duration);
+
+                // sourceBuffer.addEventListener("updateend", function onUpdateEnd() {
+                //   sourceBuffer.removeEventListener("updateend", onUpdateEnd); // Remove listener to avoid infinite loop
+                // fetchSegment(startByte);
+                // });
+              }
+            });
+            */
+    </script>
+  </body>
+</html>
