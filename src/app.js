@@ -2,7 +2,7 @@ const express = require("express");
 const fs = require("fs");
 const app = express();
 const path = require("path");
-const { transcodeVideo } = require("./utils");
+const { transcodeVideo } = require("../utils");
 
 app.use(function (req, res, next) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -12,11 +12,14 @@ app.use(function (req, res, next) {
   next();
 });
 
-app.use("/videos", express.static(path.join(__dirname, "uploads/videos")));
+app.use(
+  "/videos",
+  express.static(path.join(__dirname, "..", "uploads/videos"))
+);
 
 app.get("/videos/all", (req, res) => {
   const videos = [];
-  const videosPath = path.join(__dirname, "/uploads/videos");
+  const videosPath = path.join(__dirname, "..", "/uploads/videos");
   const files = fs.readdirSync(videosPath);
   files.forEach((file, idx) => {
     videos.push({
@@ -29,7 +32,7 @@ app.get("/videos/all", (req, res) => {
 });
 
 app.post("/videos/create", async (req, res) => {
-  const originalPath = path.join(__dirname, "/uploads/original");
+  const originalPath = path.join(__dirname, "..", "/uploads/original");
   const files = fs.readdirSync(originalPath);
 
   if (req.query.names) {
@@ -69,6 +72,7 @@ app.get("/videos/:id", (req, res) => {
 
   const playlistPath = path.join(
     __dirname,
+    "..",
     "uploads/videos/" + name,
     name + ".m3u8"
   );
@@ -112,6 +116,4 @@ app.get("/videoplayback", function (req, res) {
 });
 */
 
-app.listen(8000, function (req, res) {
-  console.log("Listening on port 8000!");
-});
+module.exports = app;
